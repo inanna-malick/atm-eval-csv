@@ -1,23 +1,14 @@
 use csv_async::{AsyncReaderBuilder, AsyncWriterBuilder};
 use futures::StreamExt;
 use rust_decimal::Decimal;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::process;
 use tokio::fs::File;
 use tokio::io;
-
-// CSV row representation
-#[derive(Debug, Deserialize)]
-struct CsvRow {
-    #[serde(rename = "type")]
-    tx_type: String,
-    client: u16,
-    tx: u32,
-    #[serde(default)]
-    amount: Option<Decimal>,
-}
 
 // Strongly-typed transaction enum
 #[derive(Debug, Clone)]
@@ -46,33 +37,89 @@ enum InputTransaction {
     },
 }
 
-impl From<CsvRow> for Option<InputTransaction> {
-    fn from(row: CsvRow) -> Self {
-        match row.tx_type.trim().to_lowercase().as_str() {
-            "deposit" => row.amount.map(|amount| InputTransaction::Deposit {
-                client: row.client,
-                tx: row.tx,
-                amount,
-            }),
-            "withdrawal" => row.amount.map(|amount| InputTransaction::Withdrawal {
-                client: row.client,
-                tx: row.tx,
-                amount,
-            }),
-            "dispute" => Some(InputTransaction::Dispute {
-                client: row.client,
-                tx: row.tx,
-            }),
-            "resolve" => Some(InputTransaction::Resolve {
-                client: row.client,
-                tx: row.tx,
-            }),
-            "chargeback" => Some(InputTransaction::Chargeback {
-                client: row.client,
-                tx: row.tx,
-            }),
-            _ => None,
+impl<'de> Deserialize<'de> for InputTransaction {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "lowercase")]
+        enum Field {
+            Type,
+            Client,
+            Tx,
+            Amount,
         }
+
+        struct TransactionVisitor;
+
+        impl<'de> Visitor<'de> for TransactionVisitor {
+            type Value = InputTransaction;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a transaction record")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<InputTransaction, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut tx_type: Option<String> = None;
+                let mut client: Option<u16> = None;
+                let mut tx: Option<u32> = None;
+                let mut amount: Option<Decimal> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Type => {
+                            if tx_type.is_some() {
+                                return Err(de::Error::duplicate_field("type"));
+                            }
+                            tx_type = Some(map.next_value()?);
+                        }
+                        Field::Client => {
+                            if client.is_some() {
+                                return Err(de::Error::duplicate_field("client"));
+                            }
+                            client = Some(map.next_value()?);
+                        }
+                        Field::Tx => {
+                            if tx.is_some() {
+                                return Err(de::Error::duplicate_field("tx"));
+                            }
+                            tx = Some(map.next_value()?);
+                        }
+                        Field::Amount => {
+                            amount = map.next_value()?;
+                        }
+                    }
+                }
+
+                let tx_type = tx_type.ok_or_else(|| de::Error::missing_field("type"))?;
+                let client = client.ok_or_else(|| de::Error::missing_field("client"))?;
+                let tx = tx.ok_or_else(|| de::Error::missing_field("tx"))?;
+
+                match tx_type.trim().to_lowercase().as_str() {
+                    "deposit" => {
+                        let amount = amount.ok_or_else(|| de::Error::missing_field("amount"))?;
+                        Ok(InputTransaction::Deposit { client, tx, amount })
+                    }
+                    "withdrawal" => {
+                        let amount = amount.ok_or_else(|| de::Error::missing_field("amount"))?;
+                        Ok(InputTransaction::Withdrawal { client, tx, amount })
+                    }
+                    "dispute" => Ok(InputTransaction::Dispute { client, tx }),
+                    "resolve" => Ok(InputTransaction::Resolve { client, tx }),
+                    "chargeback" => Ok(InputTransaction::Chargeback { client, tx }),
+                    _ => Err(de::Error::unknown_variant(
+                        &tx_type,
+                        &["deposit", "withdrawal", "dispute", "resolve", "chargeback"],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_map(TransactionVisitor)
     }
 }
 
@@ -305,15 +352,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // Process transactions
     let mut engine = PaymentsEngine::new();
-    let mut records = reader.deserialize::<CsvRow>();
+    let mut records = reader.deserialize::<InputTransaction>();
 
     while let Some(result) = records.next().await {
         match result {
-            Ok(row) => {
-                // Convert CSV row to strongly-typed transaction
-                if let Some(transaction) = Option::<InputTransaction>::from(row) {
-                    engine.process_transaction(transaction);
-                }
+            Ok(transaction) => {
+                engine.process_transaction(transaction);
             }
             Err(_) => {
                 // Skip invalid records silently
