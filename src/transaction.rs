@@ -4,6 +4,10 @@ use serde::Deserialize;
 use std::fmt;
 
 /// Strongly-typed transaction enum representing all possible transaction types
+///
+/// Note: We use a custom Deserialize implementation instead of `#[serde(tag = "type")]`
+/// because internally tagged enums don't work well with CSV format. CSV deserializers
+/// process fields sequentially rather than as a map, which internally tagged enums require.
 #[derive(Debug, Clone)]
 pub enum InputTransaction {
     Deposit {
