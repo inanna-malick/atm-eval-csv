@@ -1,5 +1,7 @@
-use rust_decimal::Decimal;
+use fastnum::D128; // Signed decimal with 128-bit precision
 use serde::Serialize;
+
+type Decimal = D128;
 
 /// Account balance and status information
 #[derive(Debug, Clone, Serialize)]
@@ -18,8 +20,8 @@ fn serialize_decimal<S>(decimal: &Decimal, serializer: S) -> Result<S::Ok, S::Er
 where
     S: serde::Serializer,
 {
-    let rounded = decimal.round_dp(4);
-    serializer.serialize_str(&rounded.to_string())
+    // Format with 4 decimal places precision
+    serializer.serialize_str(&format!("{:.4}", decimal))
 }
 
 impl Account {

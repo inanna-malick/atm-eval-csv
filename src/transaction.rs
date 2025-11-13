@@ -1,7 +1,9 @@
-use rust_decimal::Decimal;
+use fastnum::D128; // Signed decimal with 128-bit precision
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
 use std::fmt;
+
+type Decimal = D128;
 
 /// Strongly-typed transaction enum representing all possible transaction types
 ///

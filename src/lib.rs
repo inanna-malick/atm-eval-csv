@@ -8,12 +8,14 @@ pub mod transaction;
 
 use account::{Account, StoredTransaction, TransactionType};
 use csv_async::{AsyncReaderBuilder, AsyncWriterBuilder};
+use fastnum::D128;
 use futures::StreamExt;
-use rust_decimal::Decimal;
 use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io;
 use transaction::InputTransaction;
+
+type Decimal = D128;
 
 /// The main payments processing engine
 pub struct PaymentsEngine {
