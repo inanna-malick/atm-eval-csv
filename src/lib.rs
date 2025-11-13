@@ -1,154 +1,217 @@
-//! A high-performance, type-safe payments processing engine
-//!
-//! This library provides functionality for processing financial transactions including
-//! deposits, withdrawals, disputes, and chargebacks with precise decimal arithmetic.
+//! Payments processing engine for deposits, withdrawals, disputes, and chargebacks.
 
-pub mod account;
 pub mod transaction;
+pub mod types;
 
-use account::{Account, StoredTransaction, TransactionType};
 use csv_async::{AsyncReaderBuilder, AsyncWriterBuilder};
-use fastnum::D128;
 use futures::StreamExt;
+use serde::Serialize;
 use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io;
 use transaction::InputTransaction;
+use types::{SignedDecimal, UnsignedDecimal};
 
-type Decimal = D128;
+#[derive(Debug, Clone, PartialEq)]
+pub enum Error {
+    AccountLocked,
+    AccountNotFound,
+    InsufficientFunds,
+    InsufficientHeldFunds,
+    DuplicateTransaction,
+    TransactionNotFound,
+    DisputeOnWithdrawal,
+    AlreadyDisputed,
+    ResolveNonDisputed,
+    ChargebackNonDisputed,
+}
 
-/// The main payments processing engine
+fn serialize_decimal<S, T: std::fmt::Display>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&format!("{:.4}", value))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Account {
+    pub client: u16,
+    #[serde(serialize_with = "serialize_decimal")]
+    pub available: SignedDecimal,
+    #[serde(serialize_with = "serialize_decimal")]
+    pub held: UnsignedDecimal,
+    #[serde(serialize_with = "serialize_decimal")]
+    pub total: SignedDecimal,
+    pub locked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum StoredTransaction {
+    Deposit {
+        amount: UnsignedDecimal,
+        disputed: bool,
+    },
+    Withdrawal {
+        amount: UnsignedDecimal,
+    },
+}
+
+#[derive(Default)]
 pub struct PaymentsEngine {
-    accounts: HashMap<u16, Account>,
-    transactions: HashMap<u32, StoredTransaction>,
+    pub accounts: HashMap<u16, Account>,
+    transactions: HashMap<(u16, u32), StoredTransaction>,
 }
 
 impl PaymentsEngine {
-    /// Create a new payments engine
-    pub fn new() -> Self {
-        PaymentsEngine {
-            accounts: HashMap::new(),
-            transactions: HashMap::new(),
-        }
-    }
-
-    /// Get or create an account for a client
-    fn get_or_create_account(&mut self, client_id: u16) -> &mut Account {
-        self.accounts
-            .entry(client_id)
-            .or_insert_with(|| Account::new(client_id))
-    }
-
-    /// Process a single transaction
-    pub fn process_transaction(&mut self, input: InputTransaction) {
+    pub fn process_transaction(&mut self, input: InputTransaction) -> Result<(), Error> {
         match input {
             InputTransaction::Deposit { client, tx, amount } => {
-                if amount > Decimal::ZERO {
-                    let account = self.get_or_create_account(client);
-                    account.deposit(amount);
-
-                    // Store the transaction for potential disputes
-                    self.transactions.insert(
-                        tx,
-                        StoredTransaction::new(tx, client, TransactionType::Deposit, amount),
-                    );
+                if self.transactions.contains_key(&(client, tx)) {
+                    return Err(Error::DuplicateTransaction);
                 }
+                let account = self.accounts.entry(client).or_insert_with(|| Account {
+                    client,
+                    available: SignedDecimal::ZERO,
+                    held: UnsignedDecimal::ZERO,
+                    total: SignedDecimal::ZERO,
+                    locked: false,
+                });
+                if account.locked {
+                    return Err(Error::AccountLocked);
+                }
+                let amount_signed = SignedDecimal::from(amount);
+                account.available += amount_signed;
+                account.total += amount_signed;
+                self.transactions.insert(
+                    (client, tx),
+                    StoredTransaction::Deposit {
+                        amount,
+                        disputed: false,
+                    },
+                );
+                Ok(())
             }
             InputTransaction::Withdrawal { client, tx, amount } => {
-                if amount > Decimal::ZERO {
-                    let account = self.get_or_create_account(client);
-                    if account.withdraw(amount) {
-                        // Only store successful withdrawals
-                        self.transactions.insert(
-                            tx,
-                            StoredTransaction::new(tx, client, TransactionType::Withdrawal, amount),
-                        );
-                    }
+                if self.transactions.contains_key(&(client, tx)) {
+                    return Err(Error::DuplicateTransaction);
                 }
+                let account = self
+                    .accounts
+                    .get_mut(&client)
+                    .ok_or(Error::AccountNotFound)?;
+                if account.locked {
+                    return Err(Error::AccountLocked);
+                }
+                let amount_signed = SignedDecimal::from(amount);
+                if account.available < amount_signed {
+                    return Err(Error::InsufficientFunds);
+                }
+                account.available -= amount_signed;
+                account.total -= amount_signed;
+                self.transactions
+                    .insert((client, tx), StoredTransaction::Withdrawal { amount });
+                Ok(())
             }
             InputTransaction::Dispute { client, tx } => {
-                // Find the referenced transaction and check if it can be disputed
-                let should_dispute = self.transactions.get(&tx).map_or(false, |t| {
-                    t.client_id == client
-                        && t.tx_type == TransactionType::Deposit
-                        && !t.disputed
-                });
+                let account = self
+                    .accounts
+                    .get_mut(&client)
+                    .ok_or(Error::TransactionNotFound)?;
+                if account.locked {
+                    return Err(Error::AccountLocked);
+                }
 
-                if should_dispute {
-                    if let Some(transaction) = self.transactions.get_mut(&tx) {
-                        let amount = transaction.amount;
-                        transaction.disputed = true;
-                        let account = self.get_or_create_account(client);
-                        account.hold_funds(amount);
+                match self.transactions.get_mut(&(client, tx)) {
+                    Some(StoredTransaction::Deposit { amount, disputed }) if !*disputed => {
+                        let amt = *amount;
+                        *disputed = true;
+                        let amount_signed = SignedDecimal::from(amt);
+                        account.available -= amount_signed;
+                        account.held += amt;
+                        Ok(())
                     }
+                    Some(StoredTransaction::Deposit { .. }) => Err(Error::AlreadyDisputed),
+                    Some(StoredTransaction::Withdrawal { .. }) => Err(Error::DisputeOnWithdrawal),
+                    None => Err(Error::TransactionNotFound),
                 }
             }
             InputTransaction::Resolve { client, tx } => {
-                // Find the referenced transaction and check if it can be resolved
-                let should_resolve = self.transactions.get(&tx).map_or(false, |t| {
-                    t.client_id == client && t.disputed
-                });
+                let account = self
+                    .accounts
+                    .get_mut(&client)
+                    .ok_or(Error::TransactionNotFound)?;
+                if account.locked {
+                    return Err(Error::AccountLocked);
+                }
 
-                if should_resolve {
-                    if let Some(transaction) = self.transactions.get_mut(&tx) {
-                        let amount = transaction.amount;
-                        transaction.disputed = false;
-                        let account = self.get_or_create_account(client);
-                        account.release_funds(amount);
+                match self.transactions.get_mut(&(client, tx)) {
+                    Some(StoredTransaction::Deposit { amount, disputed }) if *disputed => {
+                        let amt = *amount;
+                        *disputed = false;
+                        if account.held < amt {
+                            return Err(Error::InsufficientHeldFunds);
+                        }
+                        account.held -= amt;
+                        let amount_signed = SignedDecimal::from(amt);
+                        account.available += amount_signed;
+                        Ok(())
+                    }
+                    Some(StoredTransaction::Deposit { .. }) => Err(Error::ResolveNonDisputed),
+                    Some(StoredTransaction::Withdrawal { .. }) | None => {
+                        Err(Error::TransactionNotFound)
                     }
                 }
             }
             InputTransaction::Chargeback { client, tx } => {
-                // Find the referenced transaction and check if it can be charged back
-                let should_chargeback = self.transactions.get(&tx).map_or(false, |t| {
-                    t.client_id == client && t.disputed
-                });
+                let account = self
+                    .accounts
+                    .get_mut(&client)
+                    .ok_or(Error::TransactionNotFound)?;
 
-                if should_chargeback {
-                    if let Some(transaction) = self.transactions.get_mut(&tx) {
-                        let amount = transaction.amount;
-                        transaction.disputed = false; // No longer disputed, it's been charged back
-                        let account = self.get_or_create_account(client);
-                        account.chargeback(amount);
+                match self.transactions.get_mut(&(client, tx)) {
+                    Some(StoredTransaction::Deposit { amount, disputed }) if *disputed => {
+                        let amt = *amount;
+                        *disputed = false;
+                        if account.held < amt {
+                            return Err(Error::InsufficientHeldFunds);
+                        }
+                        account.held -= amt;
+                        let amount_signed = SignedDecimal::from(amt);
+                        account.total -= amount_signed;
+                        account.locked = true;
+                        Ok(())
+                    }
+                    Some(StoredTransaction::Deposit { .. }) => Err(Error::ChargebackNonDisputed),
+                    Some(StoredTransaction::Withdrawal { .. }) | None => {
+                        Err(Error::TransactionNotFound)
                     }
                 }
             }
         }
     }
-
-    /// Get all accounts sorted by client ID
-    pub fn get_accounts(&self) -> Vec<Account> {
-        let mut accounts: Vec<_> = self.accounts.values().cloned().collect();
-        accounts.sort_by_key(|a| a.client);
-        accounts
-    }
 }
 
-impl Default for PaymentsEngine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Process transactions from a CSV file
-pub async fn process_csv_file(input_path: &str) -> Result<PaymentsEngine, Box<dyn std::error::Error>> {
+pub async fn process_csv_file(
+    input_path: &str,
+) -> Result<PaymentsEngine, Box<dyn std::error::Error>> {
     let file = File::open(input_path).await?;
     let mut reader = AsyncReaderBuilder::new()
         .flexible(true)
         .trim(csv_async::Trim::All)
         .create_deserializer(file);
 
-    let mut engine = PaymentsEngine::new();
+    let mut engine = PaymentsEngine::default();
     let mut records = reader.deserialize::<InputTransaction>();
 
     while let Some(result) = records.next().await {
         match result {
             Ok(transaction) => {
-                engine.process_transaction(transaction);
+                if let Err(e) = engine.process_transaction(transaction) {
+                    eprintln!("Transaction error: {:?}", e);
+                }
             }
-            Err(_) => {
-                // Skip invalid records silently
-                continue;
+            Err(e) => {
+                eprintln!("Parse error: {:?}", e);
             }
         }
     }
@@ -156,12 +219,13 @@ pub async fn process_csv_file(input_path: &str) -> Result<PaymentsEngine, Box<dy
     Ok(engine)
 }
 
-/// Write accounts to stdout as CSV
-pub async fn write_accounts_csv(accounts: &[Account]) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn write_accounts_csv(
+    accounts: &HashMap<u16, Account>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdout = io::stdout();
     let mut writer = AsyncWriterBuilder::new().create_serializer(&mut stdout);
 
-    for account in accounts {
+    for account in accounts.values() {
         writer.serialize(account).await?;
     }
 

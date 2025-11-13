@@ -1,254 +1,415 @@
 use payments_engine::transaction::InputTransaction;
+use payments_engine::types::{SignedDecimal, UnsignedDecimal};
 use payments_engine::PaymentsEngine;
-use fastnum::D128;
 
-type Decimal = D128;
+fn signed_decimal(s: &str) -> SignedDecimal {
+    s.parse()
+        .unwrap_or_else(|_| panic!("failed to parse signed decimal: {}", s))
+}
 
-// Helper function to create decimals from strings
-fn decimal(s: &str) -> Decimal {
-    s.parse().unwrap()
+fn unsigned_decimal(s: &str) -> UnsignedDecimal {
+    s.parse()
+        .unwrap_or_else(|_| panic!("failed to parse unsigned decimal: {}", s))
 }
 
 #[test]
 fn test_basic_deposit() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].client, 1);
-    assert_eq!(accounts[0].available, decimal("100.0"));
-    assert_eq!(accounts[0].total, decimal("100.0"));
-    assert_eq!(accounts[0].held, Decimal::ZERO);
+    assert_eq!(engine.accounts.len(), 1);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.client, 1);
+    assert_eq!(account.available, signed_decimal("100.0"));
+    assert_eq!(account.total, signed_decimal("100.0"));
+    assert_eq!(account.held, UnsignedDecimal::ZERO);
 }
 
 #[test]
 fn test_basic_withdrawal() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Withdrawal {
-        client: 1,
-        tx: 2,
-        amount: decimal("30.0"),
-    });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Withdrawal {
+            client: 1,
+            tx: 2,
+            amount: unsigned_decimal("30.0"),
+        })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts[0].available, decimal("70.0"));
-    assert_eq!(accounts[0].total, decimal("70.0"));
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("70.0"));
+    assert_eq!(account.total, signed_decimal("70.0"));
 }
 
 #[test]
 fn test_insufficient_funds_withdrawal() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("50.0"),
-    });
-    engine.process_transaction(InputTransaction::Withdrawal {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("50.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Withdrawal {
         client: 1,
         tx: 2,
-        amount: decimal("100.0"),
+        amount: unsigned_decimal("100.0"),
     });
+    assert!(result.is_err());
 
-    let accounts = engine.get_accounts();
-    // Withdrawal should fail, balance should remain 50.0
-    assert_eq!(accounts[0].available, decimal("50.0"));
-    assert_eq!(accounts[0].total, decimal("50.0"));
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("50.0"));
+    assert_eq!(account.total, signed_decimal("50.0"));
 }
 
 #[test]
 fn test_dispute() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts[0].available, Decimal::ZERO);
-    assert_eq!(accounts[0].held, decimal("100.0"));
-    assert_eq!(accounts[0].total, decimal("100.0"));
-    assert!(!accounts[0].locked);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, SignedDecimal::ZERO);
+    assert_eq!(account.held, unsigned_decimal("100.0"));
+    assert_eq!(account.total, signed_decimal("100.0"));
+    assert!(!account.locked);
 }
 
 #[test]
 fn test_dispute_with_negative_available() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Withdrawal {
-        client: 1,
-        tx: 2,
-        amount: decimal("60.0"),
-    });
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Withdrawal {
+            client: 1,
+            tx: 2,
+            amount: unsigned_decimal("60.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    // available: 40 - 100 = -60
-    assert_eq!(accounts[0].available, decimal("-60.0"));
-    assert_eq!(accounts[0].held, decimal("100.0"));
-    assert_eq!(accounts[0].total, decimal("40.0"));
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("-60.0"));
+    assert_eq!(account.held, unsigned_decimal("100.0"));
+    assert_eq!(account.total, signed_decimal("40.0"));
 }
 
 #[test]
 fn test_resolve() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
-    engine.process_transaction(InputTransaction::Resolve { client: 1, tx: 1 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Resolve { client: 1, tx: 1 })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts[0].available, decimal("100.0"));
-    assert_eq!(accounts[0].held, Decimal::ZERO);
-    assert_eq!(accounts[0].total, decimal("100.0"));
-    assert!(!accounts[0].locked);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("100.0"));
+    assert_eq!(account.held, UnsignedDecimal::ZERO);
+    assert_eq!(account.total, signed_decimal("100.0"));
+    assert!(!account.locked);
 }
 
 #[test]
 fn test_chargeback() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
-    engine.process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts[0].available, Decimal::ZERO);
-    assert_eq!(accounts[0].held, Decimal::ZERO);
-    assert_eq!(accounts[0].total, Decimal::ZERO);
-    assert!(accounts[0].locked);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, SignedDecimal::ZERO);
+    assert_eq!(account.held, UnsignedDecimal::ZERO);
+    assert_eq!(account.total, SignedDecimal::ZERO);
+    assert!(account.locked);
 }
 
 #[test]
 fn test_locked_account_prevents_deposits() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
-    engine.process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 });
-    // Try to deposit after account is locked
-    engine.process_transaction(InputTransaction::Deposit {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Deposit {
         client: 1,
         tx: 2,
-        amount: decimal("50.0"),
+        amount: unsigned_decimal("50.0"),
     });
+    assert!(result.is_err());
 
-    let accounts = engine.get_accounts();
-    // Balance should still be 0, deposit should be rejected
-    assert_eq!(accounts[0].total, Decimal::ZERO);
-    assert!(accounts[0].locked);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.total, SignedDecimal::ZERO);
+    assert!(account.locked);
 }
 
 #[test]
 fn test_multiple_clients() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 2,
-        tx: 2,
-        amount: decimal("200.0"),
-    });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 2,
+            tx: 2,
+            amount: unsigned_decimal("200.0"),
+        })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts.len(), 2);
-    assert_eq!(accounts[0].client, 1);
-    assert_eq!(accounts[0].total, decimal("100.0"));
-    assert_eq!(accounts[1].client, 2);
-    assert_eq!(accounts[1].total, decimal("200.0"));
+    assert_eq!(engine.accounts.len(), 2);
+    let account1 = engine.accounts.get(&1).unwrap();
+    assert_eq!(account1.client, 1);
+    assert_eq!(account1.total, signed_decimal("100.0"));
+    let account2 = engine.accounts.get(&2).unwrap();
+    assert_eq!(account2.client, 2);
+    assert_eq!(account2.total, signed_decimal("200.0"));
 }
 
 #[test]
 fn test_dispute_only_affects_deposits() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Withdrawal {
-        client: 1,
-        tx: 2,
-        amount: decimal("30.0"),
-    });
-    // Try to dispute the withdrawal
-    engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 2 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Withdrawal {
+            client: 1,
+            tx: 2,
+            amount: unsigned_decimal("30.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 2 });
+    assert!(result.is_err());
 
-    let accounts = engine.get_accounts();
-    // Dispute should be ignored, balance unchanged
-    assert_eq!(accounts[0].available, decimal("70.0"));
-    assert_eq!(accounts[0].held, Decimal::ZERO);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("70.0"));
+    assert_eq!(account.held, UnsignedDecimal::ZERO);
 }
 
 #[test]
 fn test_precision() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("1.2345"),
-    });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("1.2345"),
+        })
+        .unwrap();
 
-    let accounts = engine.get_accounts();
-    assert_eq!(accounts[0].available, decimal("1.2345"));
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("1.2345"));
 }
 
 #[test]
 fn test_cannot_resolve_without_dispute() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
-        client: 1,
-        tx: 1,
-        amount: decimal("100.0"),
-    });
-    engine.process_transaction(InputTransaction::Resolve { client: 1, tx: 1 });
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Resolve { client: 1, tx: 1 });
+    assert!(result.is_err());
 
-    let accounts = engine.get_accounts();
-    // Resolve should be ignored without prior dispute
-    assert_eq!(accounts[0].available, decimal("100.0"));
-    assert_eq!(accounts[0].held, Decimal::ZERO);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("100.0"));
+    assert_eq!(account.held, UnsignedDecimal::ZERO);
 }
 
 #[test]
 fn test_cannot_chargeback_without_dispute() {
-    let mut engine = PaymentsEngine::new();
-    engine.process_transaction(InputTransaction::Deposit {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 });
+    assert!(result.is_err());
+
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("100.0"));
+    assert_eq!(account.total, signed_decimal("100.0"));
+    assert!(!account.locked);
+}
+
+#[test]
+fn test_duplicate_deposit() {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Deposit {
         client: 1,
         tx: 1,
-        amount: decimal("100.0"),
+        amount: unsigned_decimal("50.0"),
     });
-    engine.process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 });
+    assert!(result.is_err());
 
-    let accounts = engine.get_accounts();
-    // Chargeback should be ignored without prior dispute
-    assert_eq!(accounts[0].available, decimal("100.0"));
-    assert_eq!(accounts[0].total, decimal("100.0"));
-    assert!(!accounts[0].locked);
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("100.0"));
+}
+
+#[test]
+fn test_duplicate_withdrawal() {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Withdrawal {
+            client: 1,
+            tx: 2,
+            amount: unsigned_decimal("30.0"),
+        })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Withdrawal {
+        client: 1,
+        tx: 2,
+        amount: unsigned_decimal("20.0"),
+    });
+    assert!(result.is_err());
+
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, signed_decimal("70.0"));
+}
+
+#[test]
+fn test_already_disputed_error() {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Dispute { client: 1, tx: 1 });
+    assert!(result.is_err());
+
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.available, SignedDecimal::ZERO);
+    assert_eq!(account.held, unsigned_decimal("100.0"));
+}
+
+#[test]
+fn test_withdrawal_from_locked_account_error() {
+    let mut engine = PaymentsEngine::default();
+    engine
+        .process_transaction(InputTransaction::Deposit {
+            client: 1,
+            tx: 1,
+            amount: unsigned_decimal("100.0"),
+        })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Dispute { client: 1, tx: 1 })
+        .unwrap();
+    engine
+        .process_transaction(InputTransaction::Chargeback { client: 1, tx: 1 })
+        .unwrap();
+    let result = engine.process_transaction(InputTransaction::Withdrawal {
+        client: 1,
+        tx: 2,
+        amount: unsigned_decimal("50.0"),
+    });
+    assert!(result.is_err());
+
+    let account = engine.accounts.get(&1).unwrap();
+    assert_eq!(account.total, SignedDecimal::ZERO);
+    assert!(account.locked);
+}
+
+#[test]
+fn test_withdrawal_from_nonexistent_account() {
+    let mut engine = PaymentsEngine::default();
+    let result = engine.process_transaction(InputTransaction::Withdrawal {
+        client: 1,
+        tx: 1,
+        amount: unsigned_decimal("50.0"),
+    });
+    assert!(result.is_err());
+    assert_eq!(engine.accounts.len(), 0);
 }

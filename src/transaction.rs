@@ -1,26 +1,17 @@
-use fastnum::D128; // Signed decimal with 128-bit precision
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use crate::types::UnsignedDecimal;
 use serde::Deserialize;
-use std::fmt;
 
-type Decimal = D128;
-
-/// Strongly-typed transaction enum representing all possible transaction types
-///
-/// Note: We use a custom Deserialize implementation instead of `#[serde(tag = "type")]`
-/// because internally tagged enums don't work well with CSV format. CSV deserializers
-/// process fields sequentially rather than as a map, which internally tagged enums require.
 #[derive(Debug, Clone)]
 pub enum InputTransaction {
     Deposit {
         client: u16,
         tx: u32,
-        amount: Decimal,
+        amount: UnsignedDecimal,
     },
     Withdrawal {
         client: u16,
         tx: u32,
-        amount: Decimal,
+        amount: UnsignedDecimal,
     },
     Dispute {
         client: u16,
@@ -36,24 +27,64 @@ pub enum InputTransaction {
     },
 }
 
-impl InputTransaction {
-    pub fn client(&self) -> u16 {
-        match self {
-            InputTransaction::Deposit { client, .. } => *client,
-            InputTransaction::Withdrawal { client, .. } => *client,
-            InputTransaction::Dispute { client, .. } => *client,
-            InputTransaction::Resolve { client, .. } => *client,
-            InputTransaction::Chargeback { client, .. } => *client,
-        }
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TransactionType {
+    Deposit,
+    Withdrawal,
+    Dispute,
+    Resolve,
+    Chargeback,
+}
 
-    pub fn tx(&self) -> u32 {
-        match self {
-            InputTransaction::Deposit { tx, .. } => *tx,
-            InputTransaction::Withdrawal { tx, .. } => *tx,
-            InputTransaction::Dispute { tx, .. } => *tx,
-            InputTransaction::Resolve { tx, .. } => *tx,
-            InputTransaction::Chargeback { tx, .. } => *tx,
+#[derive(Deserialize)]
+struct TransactionRecord {
+    #[serde(rename = "type")]
+    tx_type: TransactionType,
+    client: u16,
+    tx: u32,
+    amount: Option<UnsignedDecimal>,
+}
+
+impl TryFrom<TransactionRecord> for InputTransaction {
+    type Error = &'static str;
+
+    fn try_from(record: TransactionRecord) -> Result<Self, Self::Error> {
+        match record.tx_type {
+            TransactionType::Deposit => {
+                let amount = record.amount.ok_or("missing amount for deposit")?;
+                if amount == UnsignedDecimal::ZERO {
+                    return Err("deposit amount cannot be zero");
+                }
+                Ok(InputTransaction::Deposit {
+                    client: record.client,
+                    tx: record.tx,
+                    amount,
+                })
+            }
+            TransactionType::Withdrawal => {
+                let amount = record.amount.ok_or("missing amount for withdrawal")?;
+                if amount == UnsignedDecimal::ZERO {
+                    return Err("withdrawal amount cannot be zero");
+                }
+                Ok(InputTransaction::Withdrawal {
+                    client: record.client,
+                    tx: record.tx,
+                    amount,
+                })
+            }
+            TransactionType::Dispute => Ok(InputTransaction::Dispute {
+                client: record.client,
+                tx: record.tx,
+            }),
+            TransactionType::Resolve => Ok(InputTransaction::Resolve {
+                client: record.client,
+                tx: record.tx,
+            }),
+            TransactionType::Chargeback => Ok(InputTransaction::Chargeback {
+                client: record.client,
+                tx: record.tx,
+            }),
         }
     }
 }
@@ -61,85 +92,9 @@ impl InputTransaction {
 impl<'de> Deserialize<'de> for InputTransaction {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
-        D: Deserializer<'de>,
+        D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(field_identifier, rename_all = "lowercase")]
-        enum Field {
-            Type,
-            Client,
-            Tx,
-            Amount,
-        }
-
-        struct TransactionVisitor;
-
-        impl<'de> Visitor<'de> for TransactionVisitor {
-            type Value = InputTransaction;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a transaction record")
-            }
-
-            fn visit_map<V>(self, mut map: V) -> Result<InputTransaction, V::Error>
-            where
-                V: MapAccess<'de>,
-            {
-                let mut tx_type: Option<String> = None;
-                let mut client: Option<u16> = None;
-                let mut tx: Option<u32> = None;
-                let mut amount: Option<Decimal> = None;
-
-                while let Some(key) = map.next_key()? {
-                    match key {
-                        Field::Type => {
-                            if tx_type.is_some() {
-                                return Err(de::Error::duplicate_field("type"));
-                            }
-                            tx_type = Some(map.next_value()?);
-                        }
-                        Field::Client => {
-                            if client.is_some() {
-                                return Err(de::Error::duplicate_field("client"));
-                            }
-                            client = Some(map.next_value()?);
-                        }
-                        Field::Tx => {
-                            if tx.is_some() {
-                                return Err(de::Error::duplicate_field("tx"));
-                            }
-                            tx = Some(map.next_value()?);
-                        }
-                        Field::Amount => {
-                            amount = map.next_value()?;
-                        }
-                    }
-                }
-
-                let tx_type = tx_type.ok_or_else(|| de::Error::missing_field("type"))?;
-                let client = client.ok_or_else(|| de::Error::missing_field("client"))?;
-                let tx = tx.ok_or_else(|| de::Error::missing_field("tx"))?;
-
-                match tx_type.trim().to_lowercase().as_str() {
-                    "deposit" => {
-                        let amount = amount.ok_or_else(|| de::Error::missing_field("amount"))?;
-                        Ok(InputTransaction::Deposit { client, tx, amount })
-                    }
-                    "withdrawal" => {
-                        let amount = amount.ok_or_else(|| de::Error::missing_field("amount"))?;
-                        Ok(InputTransaction::Withdrawal { client, tx, amount })
-                    }
-                    "dispute" => Ok(InputTransaction::Dispute { client, tx }),
-                    "resolve" => Ok(InputTransaction::Resolve { client, tx }),
-                    "chargeback" => Ok(InputTransaction::Chargeback { client, tx }),
-                    _ => Err(de::Error::unknown_variant(
-                        &tx_type,
-                        &["deposit", "withdrawal", "dispute", "resolve", "chargeback"],
-                    )),
-                }
-            }
-        }
-
-        deserializer.deserialize_map(TransactionVisitor)
+        let record = TransactionRecord::deserialize(deserializer)?;
+        InputTransaction::try_from(record).map_err(serde::de::Error::custom)
     }
 }
