@@ -1,9 +1,8 @@
-use fastnum::D128; // Signed decimal with 128-bit precision
+use fastnum::D128;
 use serde::Serialize;
 
 type Decimal = D128;
 
-/// Account balance and status information
 #[derive(Debug, Clone, Serialize)]
 pub struct Account {
     pub client: u16,
@@ -20,7 +19,6 @@ fn serialize_decimal<S>(decimal: &Decimal, serializer: S) -> Result<S::Ok, S::Er
 where
     S: serde::Serializer,
 {
-    // Format with 4 decimal places precision
     serializer.serialize_str(&format!("{:.4}", decimal))
 }
 
@@ -75,14 +73,12 @@ impl Account {
     }
 }
 
-/// Type of a stored transaction (for dispute tracking)
 #[derive(Debug, Clone, PartialEq)]
 pub enum TransactionType {
     Deposit,
     Withdrawal,
 }
 
-/// Internal representation of a stored transaction for dispute tracking
 #[derive(Debug, Clone)]
 pub struct StoredTransaction {
     #[allow(dead_code)]

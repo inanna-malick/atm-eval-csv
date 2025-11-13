@@ -1,15 +1,12 @@
-use fastnum::D128; // Signed decimal with 128-bit precision
+use fastnum::D128;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
 use std::fmt;
 
 type Decimal = D128;
 
-/// Strongly-typed transaction enum representing all possible transaction types
-///
-/// Note: We use a custom Deserialize implementation instead of `#[serde(tag = "type")]`
-/// because internally tagged enums don't work well with CSV format. CSV deserializers
-/// process fields sequentially rather than as a map, which internally tagged enums require.
+// Custom Deserialize required because #[serde(tag = "type")] doesn't work with CSV.
+// CSV deserializers process fields sequentially, not as a map.
 #[derive(Debug, Clone)]
 pub enum InputTransaction {
     Deposit {
